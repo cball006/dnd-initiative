@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 
@@ -121,6 +122,9 @@ class _InitiativePageState extends State<InitiativePage> {
   int _currentIndex = 0;
 
   bool _dmInsertMode = false;
+  bool _isConnected = false;
+
+
 
   // ESP mapping: Player 1 = hub, Player 2-6 = other ESP32s
   final Map<int, String> espIds = {
@@ -139,30 +143,63 @@ class _InitiativePageState extends State<InitiativePage> {
     scanAndConnect();
   }
 
-  // -------- BLE functions --------
-  void scanAndConnect() {
-    flutterReactiveBle.scanForDevices(withServices: [serviceUuid]).listen(
-      (device) {
-        if (device.name == "ESP32_Hub") {
-          espDevice = device;
-          flutterReactiveBle.connectToDevice(id: device.id).listen(
-            (connectionState) {
-              if (connectionState.connectionState ==
-                  DeviceConnectionState.connected) {
-                ledCharacteristic = QualifiedCharacteristic(
-                  serviceId: serviceUuid,
-                  characteristicId: characteristicUuid,
-                  deviceId: device.id,
-                );
-                print("Connected to ESP32 hub");
-              }
-            },
-          );
-        }
-      },
-      onError: (e) => print("Scan error: $e"),
-    );
-  }
+
+
+void scanAndConnect() async {
+  debugPrint("Starting BLE scan...");
+
+  // Make subscription nullable
+  StreamSubscription<DiscoveredDevice>? subscription;
+
+  subscription = flutterReactiveBle
+      .scanForDevices(
+          withServices: [serviceUuid], scanMode: ScanMode.lowLatency)
+      .listen((device) async {
+    debugPrint("Found device: ${device.name} (${device.id})");
+
+    if (device.name == "ESP32_Hub") {
+      // Stop scanning as soon as we find the hub
+      await subscription?.cancel();
+      debugPrint("ESP32 Hub found. Attempting connection...");
+
+      try {
+        // Connect to hub
+        flutterReactiveBle
+            .connectToDevice(
+          id: device.id,
+          connectionTimeout: const Duration(seconds: 5),
+        )
+            .listen((connectionState) {
+          debugPrint("Connection state: ${connectionState.connectionState}");
+
+          if (connectionState.connectionState ==
+              DeviceConnectionState.connected) {
+            ledCharacteristic = QualifiedCharacteristic(
+              serviceId: serviceUuid,
+              characteristicId: characteristicUuid,
+              deviceId: device.id,
+            );
+
+            setState(() {
+              _isConnected = true; // now button can be enabled
+            });
+
+            debugPrint(
+                "Connected to ESP32 hub. LED characteristic ready!");
+          }
+        }, onError: (e) {
+          debugPrint("Connection failed: $e");
+        });
+      } catch (e) {
+        debugPrint("Connection exception: $e");
+      }
+    }
+  }, onError: (e) => debugPrint("Scan error: $e"));
+}
+
+
+
+
 
   // -------- Send turn bytes to hub & prepare for other ESP32s --------
   Future<void> sendEspTurn(int currentIndex) async {
@@ -324,6 +361,43 @@ class _InitiativePageState extends State<InitiativePage> {
               ],
             ),
             const SizedBox(height: 16),
+
+
+// ----------TEST LED Button ----------
+SizedBox(
+  width: double.infinity, // take full width
+  child: ElevatedButton(
+    style: ElevatedButton.styleFrom(
+      backgroundColor: Colors.green,
+      foregroundColor: Colors.white,
+    ),
+    onPressed: _isConnected
+        ? () async {
+            final testPacket = [
+              0x01, // Hub / Player 1 = GREEN
+              0x00,
+              0x00,
+              0x00,
+              0x00,
+              0x00,
+            ];
+
+            try {
+              await flutterReactiveBle.writeCharacteristicWithResponse(
+                ledCharacteristic!,
+                value: testPacket,
+              );
+              debugPrint("Sent test packet: $testPacket");
+            } catch (e) {
+              debugPrint("BLE write failed: $e");
+            }
+          }
+        : null, // disabled if not connected
+    child: const Text("TEST HUB GREEN"),
+  ),
+),
+const SizedBox(height: 16), // spacing
+
 
             // ---- Initiative Order List ----
             Expanded(
