@@ -108,21 +108,24 @@ class InitiativePage extends StatefulWidget {
 }
 
 class _InitiativePageState extends State<InitiativePage> {
-  final flutterReactiveBle = FlutterReactiveBle();
-  DiscoveredDevice? espDevice;
-  QualifiedCharacteristic? ledCharacteristic;
+ final flutterReactiveBle = FlutterReactiveBle();
+DiscoveredDevice? espDevice;
+QualifiedCharacteristic? ledCharacteristic;
 
-  final Uuid serviceUuid =
-      Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-  final Uuid characteristicUuid =
-      Uuid.parse("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+StreamSubscription<ConnectionStateUpdate>? _connectionSubscription; // <--- add this
 
-  List<String> _availablePlayers = [];
-  List<String> _initiativeOrder = [];
-  int _currentIndex = 0;
+final Uuid serviceUuid =
+    Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+final Uuid characteristicUuid =
+    Uuid.parse("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
 
-  bool _dmInsertMode = false;
-  bool _isConnected = false;
+List<String> _availablePlayers = [];
+List<String> _initiativeOrder = [];
+int _currentIndex = 0;
+
+bool _dmInsertMode = false;
+bool _isConnected = false;
+
 
 
 
@@ -145,57 +148,47 @@ class _InitiativePageState extends State<InitiativePage> {
 
 
 
-void scanAndConnect() async {
+void scanAndConnect() {
   debugPrint("Starting BLE scan...");
-
-  // Make subscription nullable
   StreamSubscription<DiscoveredDevice>? subscription;
 
   subscription = flutterReactiveBle
-      .scanForDevices(
-          withServices: [serviceUuid], scanMode: ScanMode.lowLatency)
+      .scanForDevices(withServices: [serviceUuid], scanMode: ScanMode.lowLatency)
       .listen((device) async {
     debugPrint("Found device: ${device.name} (${device.id})");
 
-    if (device.name == "ESP32_Hub") {
-      // Stop scanning as soon as we find the hub
+    if (device.name == "ESP32_HUB") { // make sure the name matches your BLE device exactly
       await subscription?.cancel();
-      debugPrint("ESP32 Hub found. Attempting connection...");
+      debugPrint("ESP32_HUB found. Connecting...");
 
-      try {
-        // Connect to hub
-        flutterReactiveBle
-            .connectToDevice(
-          id: device.id,
-          connectionTimeout: const Duration(seconds: 5),
-        )
-            .listen((connectionState) {
-          debugPrint("Connection state: ${connectionState.connectionState}");
+      _connectionSubscription = flutterReactiveBle
+          .connectToDevice(
+        id: device.id,
+        connectionTimeout: const Duration(seconds: 5),
+      )
+          .listen((connectionState) {
+        debugPrint("Connection state: ${connectionState.connectionState}");
 
-          if (connectionState.connectionState ==
-              DeviceConnectionState.connected) {
-            ledCharacteristic = QualifiedCharacteristic(
-              serviceId: serviceUuid,
-              characteristicId: characteristicUuid,
-              deviceId: device.id,
-            );
+        if (connectionState.connectionState == DeviceConnectionState.connected) {
+          ledCharacteristic = QualifiedCharacteristic(
+            serviceId: serviceUuid,
+            characteristicId: characteristicUuid,
+            deviceId: device.id,
+          );
 
-            setState(() {
-              _isConnected = true; // now button can be enabled
-            });
+          setState(() {
+            _isConnected = true;
+          });
 
-            debugPrint(
-                "Connected to ESP32 hub. LED characteristic ready!");
-          }
-        }, onError: (e) {
-          debugPrint("Connection failed: $e");
-        });
-      } catch (e) {
-        debugPrint("Connection exception: $e");
-      }
+          debugPrint("✅ Connected to ESP32 HUB. LED characteristic ready!");
+        }
+      }, onError: (e) {
+        debugPrint("Connection failed: $e");
+      });
     }
   }, onError: (e) => debugPrint("Scan error: $e"));
 }
+
 
 
 
