@@ -178,63 +178,108 @@ class _InitiativePageState extends State<InitiativePage> {
 
   // -------- BLE TURN SEND --------
 Future<void> sendEspTurn(int currentIndex) async {
-  if (_initiativeOrder.isEmpty || ledCharacteristic == null) return;
+  if (_initiativeOrder.isEmpty || ledCharacteristic == null) {
+    debugPrint("[sendEspTurn] ABORT: empty initiative or no BLE characteristic");
+    return;
+  }
 
+  final int n = _initiativeOrder.length;
   final Player currentPlayer = _initiativeOrder[currentIndex];
-  final Player? nextPlayer =
-      _initiativeOrder[(_initiativeOrder.indexOf(currentPlayer) + 1) %
-          _initiativeOrder.length];
 
-  // Packet for all 6 ESPs (0 = HUB)
+  debugPrint("\n========== SEND ESP TURN ==========");
+  debugPrint("Current Index: $currentIndex");
+  debugPrint("Current Player: ${currentPlayer.name} (esp=${currentPlayer.espIndex})");
+
+  debugPrint("Initiative Order:");
+  for (int i = 0; i < n; i++) {
+    final p = _initiativeOrder[i];
+    debugPrint(" [$i] ${p.name} (esp=${p.espIndex})");
+  }
+
+  // Determine GREEN / BLUE indices
+  int? greenIndex;
+  int? blueIndex;
+
+  final int rawNextIndex = (currentIndex + 1) % n;
+  final Player rawNextPlayer = _initiativeOrder[rawNextIndex];
+
+  if (currentPlayer.name == "DM") {
+    // ---------- CASE A ----------
+    debugPrint("CASE A: DM IS CURRENT");
+
+    greenIndex = null;
+
+    // Find first non-DM after DM
+    int i = rawNextIndex;
+    while (_initiativeOrder[i].name == "DM") {
+      i = (i + 1) % n;
+    }
+    blueIndex = i;
+
+    debugPrint(" Blue assigned to index $blueIndex (${_initiativeOrder[blueIndex].name})");
+  } else {
+    // ---------- CASE B ----------
+    debugPrint("CASE B: DM IS NOT CURRENT");
+
+    greenIndex = currentIndex;
+
+    if (rawNextPlayer.name != "DM") {
+      blueIndex = rawNextIndex;
+      debugPrint(" Blue assigned to NEXT (${rawNextPlayer.name})");
+    } else {
+      blueIndex = null;
+      debugPrint(" Next is DM → NO BLUE");
+    }
+  }
+
+  // Packet for all 6 ESPs
   final packet = List<int>.filled(6, 0x00);
 
-  for (final player in _initiativeOrder) {
-    int idx = player.espIndex;
+  for (int i = 0; i < n; i++) {
+    final player = _initiativeOrder[i];
 
-    // DM always uses hub LED (idx 0)
-    if (player.name == "DM") idx = 0;
+    if (player.name == "DM") {
+      debugPrint(" DM skipped (no ESP)");
+      continue;
+    }
 
-    if (idx < 0 || idx >= packet.length) continue;
+    int value = 0x00;
 
-    if (currentPlayer.name == "DM") {
-      // DM's turn: DM red, everyone else red except next player handled below
-      packet[idx] = 0x03;
-    } else if (player == currentPlayer) {
-      // Current normal player: green
-      packet[idx] = 0x01;
-    } else if (player == nextPlayer && nextPlayer!.name != "DM") {
-      // Next normal player: blue
-      packet[idx] = 0x02;
-    } else if (currentPlayer.name == "DM" && player != currentPlayer) {
-      // Everyone else when DM's turn: red
-      packet[idx] = 0x03;
+    if (greenIndex != null && i == greenIndex) {
+      value = 0x01;
+      debugPrint(" ${player.name}: GREEN (CURRENT)");
+    } else if (blueIndex != null && i == blueIndex) {
+      value = 0x02;
+      debugPrint(" ${player.name}: BLUE (NEXT)");
+    } else if (currentPlayer.name == "DM") {
+      value = 0x03;
+      debugPrint(" ${player.name}: RED (DM TURN)");
     } else {
-      // Everyone else off
-      packet[idx] = 0x00;
+      debugPrint(" ${player.name}: OFF");
+    }
+
+    final int idx = player.espIndex;
+    if (idx >= 0 && idx < packet.length) {
+      packet[idx] = value;
+      debugPrint("  ↳ packet[$idx] = ${value.toRadixString(16)}");
     }
   }
 
-  // Ensure hub LED (idx 0) is correct
-  if (packet[0] == 0x00) {
-    if (currentPlayer.name == "DM") {
-      packet[0] = 0x03; // red for DM
-    } else if (currentPlayer.espIndex == 0) {
-      packet[0] = 0x01; // green if hub player
-    } else if (nextPlayer != null && nextPlayer.espIndex == 0 && nextPlayer.name != "DM") {
-      packet[0] = 0x02; // blue if hub is next
-    }
-  }
+  debugPrint("FINAL PACKET → $packet");
+  debugPrint("==================================\n");
 
   try {
     await flutterReactiveBle.writeCharacteristicWithResponse(
       ledCharacteristic!,
       value: packet,
     );
-    debugPrint("Sent turn packet to HUB: $packet");
+    debugPrint("[sendEspTurn] BLE write SUCCESS");
   } catch (e) {
-    debugPrint("BLE write failed: $e");
+    debugPrint("[sendEspTurn] BLE write FAILED: $e");
   }
 }
+
+
 
 
 
