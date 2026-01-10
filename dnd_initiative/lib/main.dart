@@ -49,7 +49,7 @@ class _PlayerEntryPageState extends State<PlayerEntryPage> {
     final name = _playerController.text.trim();
     if (name.isEmpty) return;
 
-    final espIndex = _players.length; // entry order = ESP mapping
+    final espIndex = _players.length;
 
     setState(() {
       _players.add(Player(name: name, espIndex: espIndex));
@@ -83,15 +83,21 @@ class _PlayerEntryPageState extends State<PlayerEntryPage> {
               onSubmitted: (_) => _addPlayer(),
             ),
             const SizedBox(height: 8),
-            ElevatedButton(onPressed: _addPlayer, child: const Text("Add Player")),
+            ElevatedButton(
+              onPressed: _addPlayer,
+              child: const Text("Add Player"),
+            ),
             const SizedBox(height: 16),
             Expanded(
               child: ListView.builder(
                 itemCount: _players.length,
                 itemBuilder: (_, i) => Card(
                   child: ListTile(
+                    leading: CircleAvatar(
+                      child: Text("${_players[i].espIndex + 1}"),
+                    ),
                     title: Text(_players[i].name),
-                    subtitle: Text("ESP ${_players[i].espIndex + 1}"),
+                    subtitle: Text("ESP Slot ${_players[i].espIndex}"),
                   ),
                 ),
               ),
@@ -120,12 +126,17 @@ class InitiativePage extends StatefulWidget {
 class _InitiativePageState extends State<InitiativePage> {
   final flutterReactiveBle = FlutterReactiveBle();
   QualifiedCharacteristic? ledCharacteristic;
+  QualifiedCharacteristic? turnCharacteristic;
+
   StreamSubscription<ConnectionStateUpdate>? _connectionSubscription;
+  StreamSubscription<List<int>>? _turnSubscription;
 
   final Uuid serviceUuid =
       Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-  final Uuid characteristicUuid =
+  final Uuid ledCharUuid =
       Uuid.parse("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+  final Uuid turnCharUuid =
+      Uuid.parse("6E400004-B5A3-F393-E0A9-E50E24DCCA9E");
 
   late final Player dmPlayer;
 
@@ -144,146 +155,103 @@ class _InitiativePageState extends State<InitiativePage> {
     scanAndConnect();
   }
 
-  void scanAndConnect() {
-    StreamSubscription<DiscoveredDevice>? scanSub;
+ // ---------- BLE SCAN + CONNECT WITH RECONNECT ----------
+void scanAndConnect() {
+  StreamSubscription<DiscoveredDevice>? scanSub;
 
-    scanSub = flutterReactiveBle
-        .scanForDevices(
-          withServices: [serviceUuid],
-          scanMode: ScanMode.lowLatency,
-        )
-        .listen((device) async {
-      if (device.name == "ESP32_HUB") {
-        await scanSub?.cancel();
-
-        _connectionSubscription = flutterReactiveBle
-            .connectToDevice(
-          id: device.id,
-          connectionTimeout: const Duration(seconds: 5),
-        )
-            .listen((state) {
-          if (state.connectionState ==
-              DeviceConnectionState.connected) {
-            ledCharacteristic = QualifiedCharacteristic(
-              serviceId: serviceUuid,
-              characteristicId: characteristicUuid,
-              deviceId: device.id,
-            );
-            setState(() => _isConnected = true);
-          }
-        });
-      }
-    });
-  }
-
-  // -------- BLE TURN SEND --------
-Future<void> sendEspTurn(int currentIndex) async {
-  if (_initiativeOrder.isEmpty || ledCharacteristic == null) {
-    debugPrint("[sendEspTurn] ABORT: empty initiative or no BLE characteristic");
-    return;
-  }
-
-  final int n = _initiativeOrder.length;
-  final Player currentPlayer = _initiativeOrder[currentIndex];
-
-  debugPrint("\n========== SEND ESP TURN ==========");
-  debugPrint("Current Index: $currentIndex");
-  debugPrint("Current Player: ${currentPlayer.name} (esp=${currentPlayer.espIndex})");
-
-  debugPrint("Initiative Order:");
-  for (int i = 0; i < n; i++) {
-    final p = _initiativeOrder[i];
-    debugPrint(" [$i] ${p.name} (esp=${p.espIndex})");
-  }
-
-  // Determine GREEN / BLUE indices
-  int? greenIndex;
-  int? blueIndex;
-
-  final int rawNextIndex = (currentIndex + 1) % n;
-  final Player rawNextPlayer = _initiativeOrder[rawNextIndex];
-
-  if (currentPlayer.name == "DM") {
-    // ---------- CASE A ----------
-    debugPrint("CASE A: DM IS CURRENT");
-
-    greenIndex = null;
-
-    // Find first non-DM after DM
-    int i = rawNextIndex;
-    while (_initiativeOrder[i].name == "DM") {
-      i = (i + 1) % n;
+  scanSub = flutterReactiveBle
+      .scanForDevices(
+        withServices: [serviceUuid],
+        scanMode: ScanMode.lowLatency,
+      )
+      .listen((device) async {
+    if (device.name == "ESP32_HUB") {
+      await scanSub?.cancel();
+      _connectToHub(device.id);
     }
-    blueIndex = i;
+  });
+}
 
-    debugPrint(" Blue assigned to index $blueIndex (${_initiativeOrder[blueIndex].name})");
-  } else {
-    // ---------- CASE B ----------
-    debugPrint("CASE B: DM IS NOT CURRENT");
+// Connect to hub with auto-reconnect and proper service discovery
+void _connectToHub(String deviceId) {
+  _connectionSubscription = flutterReactiveBle
+      .connectToDevice(
+        id: deviceId,
+        connectionTimeout: const Duration(seconds: 10),
+      )
+      .listen((state) async {
+    switch (state.connectionState) {
+      case DeviceConnectionState.connected:
+        debugPrint("Connected to hub, discovering services...");
+        try {
+          // Wait for services to be ready
+          await flutterReactiveBle.discoverServices(deviceId);
 
-    greenIndex = currentIndex;
+          ledCharacteristic = QualifiedCharacteristic(
+            serviceId: serviceUuid,
+            characteristicId: ledCharUuid,
+            deviceId: deviceId,
+          );
 
-    if (rawNextPlayer.name != "DM") {
-      blueIndex = rawNextIndex;
-      debugPrint(" Blue assigned to NEXT (${rawNextPlayer.name})");
-    } else {
-      blueIndex = null;
-      debugPrint(" Next is DM → NO BLUE");
+          turnCharacteristic = QualifiedCharacteristic(
+            serviceId: serviceUuid,
+            characteristicId: turnCharUuid,
+            deviceId: deviceId,
+          );
+
+          _subscribeToTurnCommands();
+
+          setState(() => _isConnected = true);
+          debugPrint("BLE ready for writes/subscriptions");
+        } catch (e) {
+          debugPrint("Service discovery failed: $e");
+        }
+        break;
+
+      case DeviceConnectionState.disconnected:
+      case DeviceConnectionState.disconnecting:
+        debugPrint("Disconnected from hub, retrying in 2s...");
+        setState(() => _isConnected = false);
+
+        // Auto-reconnect after delay
+        Future.delayed(const Duration(seconds: 2), () => _connectToHub(deviceId));
+        break;
+
+      default:
+        break;
     }
-  }
+  }, onError: (error) {
+    debugPrint("Connection error: $error");
+    setState(() => _isConnected = false);
+    // Retry connection after short delay
+    Future.delayed(const Duration(seconds: 2), () => _connectToHub(deviceId));
+  });
+}
 
-  // Packet for all 6 ESPs
-  final packet = List<int>.filled(6, 0x00);
+// ---------- ENCODER TURN INPUT (unchanged) ----------
+void _subscribeToTurnCommands() {
+  if (turnCharacteristic == null) return;
 
-  for (int i = 0; i < n; i++) {
-    final player = _initiativeOrder[i];
+  _turnSubscription = flutterReactiveBle
+      .subscribeToCharacteristic(turnCharacteristic!)
+      .listen((data) {
+    if (data.isEmpty) return;
 
-    if (player.name == "DM") {
-      debugPrint(" DM skipped (no ESP)");
-      continue;
-    }
+    // Convert from 8-bit signed
+    final int dir = data[0] > 127 ? data[0] - 256 : data[0];
 
-    int value = 0x00;
-
-    if (greenIndex != null && i == greenIndex) {
-      value = 0x01;
-      debugPrint(" ${player.name}: GREEN (CURRENT)");
-    } else if (blueIndex != null && i == blueIndex) {
-      value = 0x02;
-      debugPrint(" ${player.name}: BLUE (NEXT)");
-    } else if (currentPlayer.name == "DM") {
-      value = 0x03;
-      debugPrint(" ${player.name}: RED (DM TURN)");
-    } else {
-      debugPrint(" ${player.name}: OFF");
-    }
-
-    final int idx = player.espIndex;
-    if (idx >= 0 && idx < packet.length) {
-      packet[idx] = value;
-      debugPrint("  ↳ packet[$idx] = ${value.toRadixString(16)}");
-    }
-  }
-
-  debugPrint("FINAL PACKET → $packet");
-  debugPrint("==================================\n");
-
-  try {
-    await flutterReactiveBle.writeCharacteristicWithResponse(
-      ledCharacteristic!,
-      value: packet,
-    );
-    debugPrint("[sendEspTurn] BLE write SUCCESS");
-  } catch (e) {
-    debugPrint("[sendEspTurn] BLE write FAILED: $e");
-  }
+    if (dir == 1) _nextTurn();           // clockwise
+    else if (dir == -1) _previousTurn(); // counterclockwise
+    else if (dir == 2) _toggleDmInsertMode(); // optional button
+  }, onError: (e) {
+    debugPrint("Turn subscription error: $e");
+  });
 }
 
 
 
 
-
-  // -------- Initiative Logic --------
+  // ---------- INITIATIVE LOGIC ----------
   void _addPlayerToInitiative(Player player) {
     setState(() {
       _initiativeOrder.add(player);
@@ -319,8 +287,7 @@ Future<void> sendEspTurn(int currentIndex) async {
   void _nextTurn() {
     if (_initiativeOrder.isEmpty) return;
     setState(() {
-      _currentIndex =
-          (_currentIndex + 1) % _initiativeOrder.length;
+      _currentIndex = (_currentIndex + 1) % _initiativeOrder.length;
     });
     sendEspTurn(_currentIndex);
   }
@@ -329,40 +296,84 @@ Future<void> sendEspTurn(int currentIndex) async {
     if (_initiativeOrder.isEmpty) return;
     setState(() {
       _currentIndex =
-          (_currentIndex - 1 + _initiativeOrder.length) %
-              _initiativeOrder.length;
+          (_currentIndex - 1 + _initiativeOrder.length) % _initiativeOrder.length;
     });
     sendEspTurn(_currentIndex);
   }
 
   void _clearOrder() {
-  setState(() {
-    _initiativeOrder.clear();
-    _currentIndex = 0;
-    _dmInsertMode = false;
-    _availablePlayers = List.from(widget.initialPlayers);
-  });
+    setState(() {
+      _initiativeOrder.clear();
+      _availablePlayers = List.from(widget.initialPlayers);
+      _currentIndex = 0;
+      _dmInsertMode = false;
+    });
+    _sendAllOff();
+  }
 
-  // Send "all off" packet to hub
-  _sendAllOff();
-}
+  // ---------- BLE LED SEND ----------
+  Future<void> sendEspTurn(int currentIndex) async {
+    if (_initiativeOrder.isEmpty || ledCharacteristic == null) return;
 
-Future<void> _sendAllOff() async {
-  if (ledCharacteristic == null) return;
+    final int n = _initiativeOrder.length;
+    final Player currentPlayer = _initiativeOrder[currentIndex];
 
-  final packet = List<int>.filled(6, 0x00); // all off
+    int? greenIndex;
+    int? blueIndex;
 
-  try {
+    final int rawNextIndex = (currentIndex + 1) % n;
+    final Player rawNextPlayer = _initiativeOrder[rawNextIndex];
+
+    if (currentPlayer.name == "DM") {
+      greenIndex = null;
+      int i = rawNextIndex;
+      while (_initiativeOrder[i].name == "DM") {
+        i = (i + 1) % n;
+      }
+      blueIndex = i;
+    } else {
+      greenIndex = currentIndex;
+      blueIndex = rawNextPlayer.name != "DM" ? rawNextIndex : null;
+    }
+
+    final packet = List<int>.filled(6, 0x00);
+
+    for (int i = 0; i < n; i++) {
+      final p = _initiativeOrder[i];
+      if (p.espIndex < 0) continue;
+
+      int value = 0x00;
+      if (greenIndex != null && i == greenIndex) value = 0x01;
+      else if (blueIndex != null && i == blueIndex) value = 0x02;
+      else if (currentPlayer.name == "DM") value = 0x03;
+
+      packet[p.espIndex] = value;
+    }
+
+    try {
+      await flutterReactiveBle.writeCharacteristicWithResponse(
+        ledCharacteristic!,
+        value: packet,
+      );
+    } catch (e) {
+      debugPrint("BLE write failed: $e");
+    }
+  }
+
+  Future<void> _sendAllOff() async {
+    if (ledCharacteristic == null) return;
     await flutterReactiveBle.writeCharacteristicWithResponse(
       ledCharacteristic!,
-      value: packet,
+      value: List<int>.filled(6, 0x00),
     );
-    debugPrint("Sent all-off packet to HUB: $packet");
-  } catch (e) {
-    debugPrint("BLE write failed: $e");
   }
-}
 
+  @override
+  void dispose() {
+    _turnSubscription?.cancel();
+    _connectionSubscription?.cancel();
+    super.dispose();
+  }
 
   // -------- UI --------
   @override
@@ -373,6 +384,7 @@ Future<void> _sendAllOff() async {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // Turn buttons
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
@@ -383,6 +395,7 @@ Future<void> _sendAllOff() async {
             ),
             const SizedBox(height: 16),
 
+            // Available players + DM button
             Wrap(
               spacing: 8,
               children: [
@@ -396,8 +409,7 @@ Future<void> _sendAllOff() async {
                   onTap: _addDmAtEnd,
                   onLongPress: _toggleDmInsertMode,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     decoration: BoxDecoration(
                       color: _dmInsertMode ? Colors.redAccent : Colors.red,
                       borderRadius: BorderRadius.circular(20),
@@ -410,16 +422,15 @@ Future<void> _sendAllOff() async {
                 ),
               ],
             ),
-
             const SizedBox(height: 16),
 
+            // Optional BLE test button
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: _isConnected
                     ? () async {
-                        await flutterReactiveBle
-                            .writeCharacteristicWithResponse(
+                        await flutterReactiveBle.writeCharacteristicWithResponse(
                           ledCharacteristic!,
                           value: [0x01],
                         );
@@ -428,9 +439,9 @@ Future<void> _sendAllOff() async {
                 child: const Text("TEST HUB GREEN"),
               ),
             ),
-
             const SizedBox(height: 16),
 
+            // Initiative list
             Expanded(
               child: ListView.builder(
                 itemCount: _initiativeOrder.length,
@@ -440,23 +451,16 @@ Future<void> _sendAllOff() async {
 
                   return GestureDetector(
                     onTap: () {
-                      if (player == dmPlayer && !_dmInsertMode) {
-                        _removeDm(i);
-                      } else if (_dmInsertMode && player != dmPlayer) {
-                        _insertDmUnder(i);
-                      }
+                      if (player == dmPlayer && !_dmInsertMode) _removeDm(i);
+                      else if (_dmInsertMode && player != dmPlayer) _insertDmUnder(i);
                     },
                     child: Card(
-                      color: isCurrent
-                          ? Colors.green[300]
-                          : Colors.white,
+                      color: isCurrent ? Colors.green[300] : Colors.white,
                       child: ListTile(
                         title: Text(
                           player.name,
                           style: TextStyle(
-                            fontWeight: player == dmPlayer
-                                ? FontWeight.bold
-                                : FontWeight.normal,
+                            fontWeight: player == dmPlayer ? FontWeight.bold : FontWeight.normal,
                           ),
                         ),
                       ),
